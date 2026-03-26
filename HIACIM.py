@@ -2,6 +2,8 @@ import streamlit as st
 from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
 import time
 from PIL import Image
+import easyocr
+import torch
 
 # Page Configuration
 st.set_page_config(
@@ -14,14 +16,7 @@ st.set_page_config(
 def main():
     st.title("🛡️ IA Sentinel")
     st.markdown("**Hong Kong Insurance Authority Complaint Analyzer**")
-    st.caption("AI-powered multilingual sentiment & severity analysis | 支持英文、普通話、粵語 | [IA Official Site](https://www.ia.org.hk)")
-
-    # Language Selector
-    language = st.selectbox(
-        "Select Input Language / 選擇輸入語言",
-        options=["Auto Detect", "English", "Mandarin (普通話)", "Cantonese (粵語)"],
-        index=0
-    )
+    st.caption("AI-powered multilingual sentiment & severity analysis + OCR | 支持英文、普通話、粵語")
 
     # ====================== MODEL LOADING ======================
     @st.cache_resource(show_spinner="Loading AI models...")
@@ -31,7 +26,7 @@ def main():
             tokenizer = AutoTokenizer.from_pretrained("IA_Complaint_Classifier")
             return pipeline("text-classification", model=model, tokenizer=tokenizer)
         except Exception:
-            st.info("Using multilingual sentiment model")
+            st.info("Using fallback multilingual sentiment model")
             return pipeline("sentiment-analysis", model="clapAI/roberta-large-multilingual-sentiment")
 
     @st.cache_resource
@@ -41,30 +36,55 @@ def main():
     classifier = load_classifier()
     tts_pipe = load_tts()
 
+    # ====================== OCR READER (cached) ======================
+    @st.cache_resource
+    def load_ocr_reader():
+        st.info("Loading OCR model... (first time may take 10-30 seconds)")
+        return easyocr.Reader(['en', 'ch_sim'], gpu=torch.cuda.is_available())  # English + Simplified Chinese
+
+    ocr_reader = load_ocr_reader()
+
     # ====================== INPUT SECTION ======================
     st.subheader("📝 Complaint Text")
     complaint_text = st.text_area(
         "Enter Insurance Complaint / 輸入保險投訴內容",
-        height=180,
+        height=150,
         placeholder="The insurer delayed my claim for 3 months...\n保險公司拖延我的索償三個月...\n保險公司拖咗我索償三個月都冇回覆...",
     )
 
-    # Image Upload Section
-    st.subheader("📸 Supporting Documents / 上傳相關文件")
+    # Image Upload + OCR
+    st.subheader("📸 Supporting Documents / 上傳相關文件 (OCR Enabled)")
     uploaded_file = st.file_uploader(
-        "Upload image of policy document, email, receipt, or screenshot (optional)",
-        type=["png", "jpg", "jpeg", "pdf"],
+        "Upload image (policy, claim letter, rejection notice, receipt, etc.)",
+        type=["png", "jpg", "jpeg"],
     )
+
+    ocr_extracted_text = ""
 
     if uploaded_file is not None:
         try:
-            if uploaded_file.type.startswith("image"):
-                image = Image.open(uploaded_file)
-                st.image(image, caption="Uploaded Supporting Document", use_column_width=True)
+            image = Image.open(uploaded_file)
+            st.image(image, caption="Uploaded Document", use_column_width=True)
+
+            # Run OCR
+            with st.spinner("Running OCR on the image... 正在進行文字識別..."):
+                ocr_result = ocr_reader.readtext(np.array(image), detail=0)  # detail=0 returns only text
+                ocr_extracted_text = " ".join(ocr_result)
+
+            if ocr_extracted_text.strip():
+                st.success("✅ OCR Text Extracted")
+                with st.expander("View Extracted Text from Image"):
+                    st.write(ocr_extracted_text)
             else:
-                st.info("📄 PDF uploaded (preview not available)")
-        except:
-            st.warning("Unable to display uploaded file.")
+                st.warning("No text detected in the image.")
+
+        except Exception as e:
+            st.error(f"Error processing image: {str(e)}")
+
+    # Combine complaint text + OCR text for analysis
+    final_text_for_analysis = complaint_text.strip()
+    if ocr_extracted_text.strip():
+        final_text_for_analysis += "\n\n[Document Content]\n" + ocr_extracted_text
 
     col1, col2 = st.columns(2)
     with col1:
@@ -75,16 +95,15 @@ def main():
                              use_container_width=True)
 
     # ====================== ANALYSIS ======================
-    if analyze_btn and complaint_text.strip():
+    if analyze_btn and final_text_for_analysis.strip():
         with st.spinner("Analyzing complaint... 分析投訴中..."):
             time.sleep(0.8)
 
-            input_text = complaint_text[:512]
+            input_text = final_text_for_analysis[:512]
             result = classifier(input_text)[0]
             label = result['label'].upper()
             score = result['score']
 
-            # Sentiment & Severity
             if any(x in label for x in ["NEGATIVE", "NEG"]) or score > 0.75:
                 sentiment = "Negative / 負面"
                 severity = "High / 高"
@@ -107,87 +126,42 @@ def main():
             st.markdown(f"### Severity: **{severity}**")
             st.info(f"**IA Recommendation / IA建議：** {advice}")
 
-            # ====================== NEW SUGGESTION SECTION ======================
+            # Suggestions Section
             st.subheader("💡 Suggestions / 建議行動")
-
             if severity == "High / 高":
-                st.markdown("""
-                **For the Complainant (投訴人建議):**
-                - Submit a formal complaint to the Insurance Authority via the IA website or hotline (2894 1222)
-                - Keep all records: policy documents, emails, call logs, and payment proofs
-                - Consider contacting the **Financial Dispute Resolution Centre (FDRC)** if the dispute involves monetary claims
-                """)
-                
-                st.markdown("""
-                **For IA Staff (IA處理建議):**
-                - Prioritize this case for investigation under the Insurance Ordinance
-                - Request full case file from the insurer within 7 working days
-                - Check for possible breaches of the **Code of Conduct for Insurers** or **Intermediaries**
-                """)
-
+                st.markdown("**For Complainant:** Submit formal complaint to IA (2894 1222) and keep all records.\n**For IA Staff:** Prioritize investigation and request full file from insurer.")
             elif severity == "Medium / 中":
-                st.markdown("""
-                **Recommended Actions:**
-                - Advise complainant to first contact the insurer’s complaint handling department in writing
-                - Request a written response from the insurer within 14 days
-                - If no satisfactory reply, escalate to IA with supporting documents
-                - Monitor for patterns if similar complaints from the same insurer appear
-                """)
-
-            else:  # Low severity
-                st.markdown("""
-                **Suggested Response:**
-                - Acknowledge the positive feedback to the complainant
-                - No immediate IA action required
-                - File the case for record and trend monitoring
-                - Optionally share good practices with the insurer
-                """)
+                st.markdown("Advise complainant to contact insurer in writing first. Escalate to IA if no satisfactory reply within 14 days.")
+            else:
+                st.markdown("Acknowledge positive feedback. No immediate action required.")
 
             # Store for TTS
             if 'last_analysis' not in st.session_state:
                 st.session_state.last_analysis = {}
-            
             st.session_state.last_analysis = {
-                "text": complaint_text,
                 "sentiment": sentiment,
                 "severity": severity,
-                "advice": advice,
-                "has_image": uploaded_file is not None
+                "advice": advice
             }
 
-    # ====================== TEXT-TO-SPEECH ======================
-    if speak_btn:
-        if 'last_analysis' not in st.session_state:
-            st.warning("Please analyze a complaint first.")
-        else:
-            with st.spinner("Generating audio... 生成語音中..."):
-                analysis_text = f"""
-                Analysis result: {st.session_state.last_analysis['sentiment']}. 
-                Severity: {st.session_state.last_analysis['severity']}. 
-                IA Recommendation: {st.session_state.last_analysis['advice']}
-                """
-                try:
-                    speech = tts_pipe(analysis_text[:500])
-                    st.audio(speech["audio"], sample_rate=speech["sampling_rate"])
-                    st.success("🔊 Audio generated successfully")
-                except Exception as e:
-                    st.error(f"Audio generation failed: {str(e)}")
+    # Text-to-Speech
+    if speak_btn and 'last_analysis' in st.session_state:
+        with st.spinner("Generating audio..."):
+            analysis_text = f"Analysis result: {st.session_state.last_analysis['sentiment']}. Severity: {st.session_state.last_analysis['severity']}. Recommendation: {st.session_state.last_analysis['advice']}"
+            try:
+                speech = tts_pipe(analysis_text[:500])
+                st.audio(speech["audio"], sample_rate=speech["sampling_rate"])
+                st.success("🔊 Audio ready!")
+            except Exception as e:
+                st.error(f"Audio failed: {str(e)}")
 
-    # ====================== SIDEBAR ======================
+    # Sidebar
     with st.sidebar:
-        st.header("🛡️ About IA Sentinel")
-        st.markdown("AI assistant for the Hong Kong Insurance Authority to support efficient complaint triage.")
-
-        st.divider()
-        st.subheader("Features")
-        st.write("• Multilingual analysis (EN / 普通話 / 粵語)")
-        st.write("• Sentiment & Severity assessment")
-        st.write("• Supporting document upload")
-        st.write("• Actionable suggestions")
-        st.write("• Text-to-Speech")
-
-        st.divider()
-        st.info("**Disclaimer:** This tool assists with initial triage only. Final decisions rest with IA officers.")
+        st.header("About IA Sentinel")
+        st.write("• Sentiment & Severity Analysis")
+        st.write("• EasyOCR for document images")
+        st.write("• Supports English + Chinese")
+        st.info("**Note:** EasyOCR may take time on first load. For best results, use clear document images.")
 
 if __name__ == "__main__":
     main()
