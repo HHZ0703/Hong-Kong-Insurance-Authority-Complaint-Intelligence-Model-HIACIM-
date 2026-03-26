@@ -3,6 +3,7 @@ from transformers import pipeline, AutoModelForSequenceClassification, AutoToken
 import torch
 import time
 
+# Page Configuration
 st.set_page_config(
     page_title="IA Sentinel",
     page_icon="🛡️",
@@ -12,157 +13,125 @@ st.set_page_config(
 def main():
     st.title("🛡️ IA Sentinel")
     st.markdown("**Hong Kong Insurance Authority Complaint Analyzer**")
-    st.caption("Multilingual AI Tool | 支持英文、普通話、粵語 | https://www.ia.org.hk")
+    st.caption("AI-powered sentiment & severity analysis for insurance complaints | https://www.ia.org.hk")
 
-    # Language selector
-    language = st.selectbox(
-        "Select Input Language / 選擇輸入語言",
-        options=["Auto Detect", "English", "Mandarin (普通話)", "Cantonese (粵語)"],
-        index=0
-    )
-
-    # Load multilingual sentiment classifier
+    # Load the fine-tuned model (fallback to general sentiment if not found)
     @st.cache_resource
-    def load_classifier():
+    def load_model():
         try:
             model = AutoModelForSequenceClassification.from_pretrained("IA_Complaint_Classifier")
             tokenizer = AutoTokenizer.from_pretrained("IA_Complaint_Classifier")
             return pipeline("text-classification", model=model, tokenizer=tokenizer)
         except:
-            st.info("Using multilingual sentiment model")
-            return pipeline("sentiment-analysis", 
-                            model="clapAI/roberta-large-multilingual-sentiment")
+            st.warning("Fine-tuned model not found. Using general sentiment pipeline.")
+            return pipeline("sentiment-analysis", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english")
 
-    classifier = load_classifier()
+    classifier = load_model()
 
-    # Summarizer
+    # Extra pipelines (all from Hugging Face)
     @st.cache_resource
     def load_summarizer():
         return pipeline("summarization", model="facebook/bart-large-cnn")
 
-    summarizer = load_summarizer()
-
-    # TTS Pipelines for 3 Languages
     @st.cache_resource
-    def load_tts_english():
+    def load_tts():
         return pipeline("text-to-speech", model="facebook/mms-tts-eng")
 
-    @st.cache_resource
-    def load_tts_mandarin():
-        return pipeline("text-to-speech", model="facebook/mms-tts-zh")  # Mandarin Chinese
+    summarizer = load_summarizer()
+    tts_pipe = load_tts()
 
-    tts_eng = load_tts_english()
-    tts_zh = load_tts_mandarin()
-
-    # Main input area
+    # Main Input
     complaint_text = st.text_area(
-        "Enter Insurance Complaint (English / 中文 / 粵語)",
+        "Enter Insurance Complaint Text",
         height=180,
-        placeholder="The insurer delayed my claim for months...\n保險公司拖延理賠三個月...\n保險公司拖咗我索償三個月都冇回覆..."
+        placeholder="The insurance company delayed my claim settlement for months and refused to provide any explanation..."
     )
 
     col1, col2 = st.columns(2)
     with col1:
-        analyze_btn = st.button("🔍 Analyze / 分析投訴", type="primary", use_container_width=True)
+        analyze_btn = st.button("🔍 Analyze Complaint", type="primary", use_container_width=True)
     with col2:
-        speak_btn = st.button("🔊 Speak Analysis in 3 Languages / 三語音播報", use_container_width=True)
+        speak_btn = st.button("🔊 Speak Analysis", use_container_width=True)
 
     if analyze_btn and complaint_text.strip():
-        with st.spinner("Analyzing... 分析中..."):
+        with st.spinner("Analyzing complaint..."):
             time.sleep(1.2)
+            
+            # Main Classification
+            results = classifier(complaint_text[:512])[0]
+            label = results['label']
+            score = results['score']
 
-            result = classifier(complaint_text[:512])[0]
-            label = result['label'].upper()
-            score = result['score']
-
-            if "NEGATIVE" in label or score > 0.75:
-                sentiment = "Negative / 負面"
-                severity = "High / 高"
+            # Map to IA-friendly output
+            if "NEGATIVE" in label.upper() or score > 0.75:
+                sentiment = "Negative"
+                severity = "High"
                 color = "🔴"
-                advice = "High priority – Recommend immediate IA review for possible misconduct."
-            elif "POSITIVE" in label:
-                sentiment = "Positive / 正面"
-                severity = "Low / 低"
+                advice = "High priority – Possible insurer misconduct or serious delay. Recommend immediate IA review."
+            elif "POSITIVE" in label.upper():
+                sentiment = "Positive"
+                severity = "Low"
                 color = "🟢"
-                advice = "Positive feedback. Low priority."
+                advice = "Positive feedback or resolved issue. Low priority."
             else:
-                sentiment = "Neutral / 中性"
-                severity = "Medium / 中"
+                sentiment = "Neutral"
+                severity = "Medium"
                 color = "🟡"
-                advice = "Moderate issue. Further review recommended."
+                advice = "Moderate concern. Further human review recommended."
 
-            st.success("Analysis Complete / 分析完成")
+            # Display Results
+            st.success("Analysis Complete")
             st.markdown(f"### {color} Sentiment: **{sentiment}** (Confidence: {score:.1%})")
-            st.markdown(f"### Severity: **{severity}**")
-            st.info(f"**IA Recommendation / IA建議：** {advice}")
+            st.markdown(f"### Severity Level: **{severity}**")
+            st.info(f"**IA Recommendation:** {advice}")
 
-            # Summary
-            st.subheader("📝 Summary / 摘要")
-            summary = summarizer(complaint_text, max_length=120, min_length=30, do_sample=False)[0]['summary_text']
+            # Extra Features
+            st.subheader("📝 Complaint Summary")
+            summary = summarizer(complaint_text, max_length=100, min_length=30, do_sample=False)[0]['summary_text']
             st.write(summary)
 
-            # Save for TTS
+            # Add to session state for audio
             if 'last_analysis' not in st.session_state:
                 st.session_state.last_analysis = {}
             st.session_state.last_analysis = {
-                "complaint": complaint_text,
+                "text": complaint_text,
                 "sentiment": sentiment,
                 "severity": severity,
                 "advice": advice,
                 "summary": summary
             }
 
-    # === Generate Audio in 3 Languages ===
+    # Text-to-Speech Feature
     if speak_btn and 'last_analysis' in st.session_state:
-        analysis = st.session_state.last_analysis
-        speak_text = f"""
-        Analysis result: {analysis['sentiment']}. Severity level: {analysis['severity']}. 
-        Summary: {analysis['summary']}. IA Recommendation: {analysis['advice']}
-        """
-
-        st.subheader("🔊 Audio Output in Three Languages")
-
-        col_eng, col_man, col_can = st.columns(3)
-
-        with col_eng:
-            st.write("**English**")
+        with st.spinner("Generating audio..."):
+            analysis_text = f"""
+            Complaint analysis: {st.session_state.last_analysis['sentiment']} sentiment, 
+            {st.session_state.last_analysis['severity']} severity. 
+            Summary: {st.session_state.last_analysis['summary']}
+            Recommendation: {st.session_state.last_analysis['advice']}
+            """
             try:
-                audio_eng = tts_eng(speak_text[:400])
-                st.audio(audio_eng["audio"], sample_rate=audio_eng["sampling_rate"])
+                speech_output = tts_pipe(analysis_text[:500])
+                st.audio(speech_output["audio"], sample_rate=speech_output["sampling_rate"])
+                st.success("🔊 Audio generated successfully!")
             except:
-                st.error("English audio failed")
+                st.error("Audio generation failed. Try again.")
 
-        with col_man:
-            st.write("**普通話 (Mandarin)**")
-            try:
-                audio_zh = tts_zh(speak_text[:400])
-                st.audio(audio_zh["audio"], sample_rate=audio_zh["sampling_rate"])
-            except:
-                st.error("Mandarin audio failed")
-
-        with col_can:
-            st.write("**粵語 (Cantonese)**")
-            st.warning("⚠️ Cantonese TTS is limited on Hugging Face. Using English voice as fallback.")
-            try:
-                # Fallback: Use English TTS with Cantonese note
-                cantonese_note = "Cantonese version: " + speak_text[:300]
-                audio_can = tts_eng(cantonese_note)
-                st.audio(audio_can["audio"], sample_rate=audio_can["sampling_rate"])
-            except:
-                st.error("Cantonese audio failed")
-
-        st.caption("Note: Cantonese spoken synthesis has limited support. For best results, use written Chinese or English.")
-
-    # Sidebar
+    # Sidebar Information
     with st.sidebar:
         st.header("About IA Sentinel")
-        st.write("• Supports English, Mandarin & Cantonese input")
-        st.write("• Sentiment + Severity Analysis")
+        st.write("AI tool to help the Hong Kong Insurance Authority triage complaints efficiently.")
+        st.write("• Sentiment Analysis")
+        st.write("• Severity Assessment")
         st.write("• Automatic Summary")
-        st.write("• Audio in English, Mandarin & Cantonese")
+        st.write("• Text-to-Speech")
+        
         st.divider()
-        st.info("All models from Hugging Face.")
-        st.caption("IA Sentinel | Consumer Protection Tool")
+        st.info("All models and datasets are from Hugging Face.")
+        st.caption("Built for regulatory compliance and consumer protection.")
+
+    # Footer
+    st.caption("IA Sentinel | Fine-tuned on financial sentiment data | Hugging Face + Streamlit")
 
 if __name__ == "__main__":
     main()
