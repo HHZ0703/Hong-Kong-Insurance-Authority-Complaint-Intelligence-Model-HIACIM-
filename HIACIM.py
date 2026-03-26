@@ -7,14 +7,14 @@ import torch
 
 # Page Configuration
 st.set_page_config(
-    page_title="IA Sentinel",
+    page_title="HKIA Complaint AI Helper",
     page_icon="🛡️",
     layout="centered",
     initial_sidebar_state="expanded"
 )
 
 def main():
-    st.title("🛡️ IA Sentinel")
+    st.title("🛡️ HKIA Complaint AI Helper")
     st.markdown("**Hong Kong Insurance Authority Complaint Analyzer**")
     st.caption("AI-powered multilingual sentiment & severity analysis + OCR | 支持英文、普通話、粵語")
 
